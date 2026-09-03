@@ -431,13 +431,15 @@ body.quiz-active { overscroll-behavior:none; }
 
   // Microphone pitch test. This build deliberately never calls submitFret().
   const OPEN_MIDI = [40,45,50,55,59,64]; // E2 A2 D3 G3 B3 e4
-  const MIC_STABLE_MS = 200;
-  const MIC_DROPOUT_GRACE_MS = 140;
+  const MIC_CONFIRM_WINDOW_MS = 180;
+  const MIC_CONFIRM_FRAMES = 3;
+  const MIC_DROPOUT_GRACE_MS = 160;
   const MIC_MAX_CENTS = 45;
   const MIC_MIN_RMS = 0.0018;
   const MIC_MIN_CONFIDENCE = 0.56;
   let micStream = null, micAudioContext = null, micAnalyser = null, micSource = null, micRaf = null;
   let micCandidateMidi = null, micCandidateSince = 0, micCandidateLastValid = 0, micStableMidi = null;
+  let micValidFrames = [], micPitchHistory = [];
   let selectedGame = "find";
   let roundOptions = { game:"find", noteSet:"all", string:"all" };
   let comboStats = new Map();
@@ -1184,6 +1186,8 @@ body.quiz-active { overscroll-behavior:none; }
     micCandidateSince = 0;
     micCandidateLastValid = 0;
     micStableMidi = null;
+    micValidFrames = [];
+    micPitchHistory = [];
     if (micState) {
       micState.textContent = message;
       micState.classList.remove("mic-stable","mic-warning");
@@ -1203,6 +1207,12 @@ body.quiz-active { overscroll-behavior:none; }
   function processMicDetection(det) {
     if (!current || roundOptions.game !== "find") return;
     const now = performance.now();
+
+    // Keep only very recent pitch evidence. This lets a short bright guitar note
+    // confirm quickly without requiring an uninterrupted long sustain.
+    micValidFrames = micValidFrames.filter(x => now - x.t <= MIC_CONFIRM_WINDOW_MS);
+    micPitchHistory = micPitchHistory.filter(x => now - x.t <= MIC_CONFIRM_WINDOW_MS);
+
     if (!det.freq || det.confidence < MIC_MIN_CONFIDENCE) {
       micDetected.textContent = "—";
       micPitch.textContent = det.rms ? `signal ${(det.rms*100).toFixed(1)}%` : "—";
@@ -1212,7 +1222,8 @@ body.quiz-active { overscroll-behavior:none; }
         ? now - micCandidateLastValid
         : Infinity;
       if (dropoutMs <= MIC_DROPOUT_GRACE_MS) {
-        micCandidate.textContent = `holding ${midiToLabel(micCandidateMidi)}`;
+        const votes = micValidFrames.filter(x => x.midi === micCandidateMidi).length;
+        micCandidate.textContent = `holding ${midiToLabel(micCandidateMidi)} · ${votes}/${MIC_CONFIRM_FRAMES}`;
         micState.textContent = "Brief pitch dropout — keeping the candidate…";
         return;
       }
@@ -1222,9 +1233,12 @@ body.quiz-active { overscroll-behavior:none; }
       return;
     }
 
-    const midiFloat = frequencyToMidi(det.freq);
-    const midi = Math.round(midiFloat);
-    const cents = (midiFloat - midi) * 100;
+    const rawMidiFloat = frequencyToMidi(det.freq);
+    micPitchHistory.push({t:now, midiFloat:rawMidiFloat});
+    const recentFloats = micPitchHistory.map(x => x.midiFloat).sort((a,b)=>a-b);
+    const smoothedMidiFloat = recentFloats[Math.floor(recentFloats.length/2)];
+    const midi = Math.round(smoothedMidiFloat);
+    const cents = (smoothedMidiFloat - midi) * 100;
     const openMidi = OPEN_MIDI[current.s];
     const fret = midi - openMidi;
     const onPromptString = fret >= 0 && fret <= 11;
@@ -1236,31 +1250,48 @@ body.quiz-active { overscroll-behavior:none; }
     micDebug.textContent = `confidence ${(det.confidence*100).toFixed(0)}% · RMS ${(det.rms*100).toFixed(3)}% · ${det.rms>0 ? (20*Math.log10(det.rms)).toFixed(1) : "−∞"} dBFS`;
 
     if (!onPromptString || !inTuneEnough) {
+      // One brief overtone/octave jump should not erase a good recent candidate.
+      const dropoutMs = micCandidateMidi !== null && micCandidateLastValid
+        ? now - micCandidateLastValid
+        : Infinity;
+      if (dropoutMs <= MIC_DROPOUT_GRACE_MS) {
+        micState.textContent = "Ignoring a brief unstable/overtone frame…";
+        return;
+      }
       resetMicCandidate(!onPromptString ? "Clear pitch, but not in this string's 0–11 range." : "Pitch is too far between notes — keep it steady.");
       micState.classList.add("mic-warning");
       return;
     }
 
-    if (micCandidateMidi !== midi) {
-      micCandidateMidi = midi;
-      micCandidateSince = now;
-      micCandidateLastValid = now;
-      micStableMidi = null;
-      micState.textContent = `Candidate ${midiToLabel(midi)} / fret ${fret} — hold…`;
-      micState.classList.remove("mic-stable","mic-warning");
-      return;
+    micCandidateLastValid = now;
+    micValidFrames.push({t:now, midi});
+    micValidFrames = micValidFrames.filter(x => now - x.t <= MIC_CONFIRM_WINDOW_MS);
+
+    const counts = new Map();
+    for (const frame of micValidFrames) counts.set(frame.midi, (counts.get(frame.midi) || 0) + 1);
+    let bestMidi = midi, bestVotes = 0;
+    for (const [m, votes] of counts) {
+      if (votes > bestVotes) { bestMidi = m; bestVotes = votes; }
     }
 
-    micCandidateLastValid = now;
-    const heldMs = now - micCandidateSince;
-    if (heldMs >= MIC_STABLE_MS) {
-      micStableMidi = midi;
-      const correct = fret === current.fret;
-      micState.textContent = `STABLE ✓ — would submit fret ${fret}${correct ? " (correct)" : " (wrong)"}`;
+    if (micCandidateMidi !== bestMidi) {
+      micCandidateMidi = bestMidi;
+      micCandidateSince = now;
+      micStableMidi = null;
+    }
+
+    const candidateFret = micCandidateMidi - openMidi;
+    const candidateVotes = counts.get(micCandidateMidi) || 0;
+    if (candidateVotes >= MIC_CONFIRM_FRAMES) {
+      micStableMidi = micCandidateMidi;
+      const correct = candidateFret === current.fret;
+      micState.textContent = `STABLE ✓ — would submit fret ${candidateFret}${correct ? " (correct)" : " (wrong)"}`;
+      micCandidate.textContent = `${midiToLabel(micCandidateMidi)} / fret ${candidateFret} · ${candidateVotes} confirming frames`;
       micState.classList.add("mic-stable");
       micState.classList.remove("mic-warning");
     } else {
-      micState.textContent = `Candidate ${midiToLabel(midi)} / fret ${fret} — hold ${Math.max(0, MIC_STABLE_MS-heldMs).toFixed(0)} ms`;
+      micState.textContent = `Candidate ${midiToLabel(micCandidateMidi)} / fret ${candidateFret} — ${candidateVotes}/${MIC_CONFIRM_FRAMES} confirming frames`;
+      micState.classList.remove("mic-stable","mic-warning");
     }
   }
 
@@ -1268,7 +1299,9 @@ body.quiz-active { overscroll-behavior:none; }
     if (!micAnalyser || !micAudioContext) return;
     const data = new Float32Array(micAnalyser.fftSize);
     micAnalyser.getFloatTimeDomainData(data);
-    processMicDetection(detectPitchYin(data, micAudioContext.sampleRate));
+    const windowSize = current && current.s >= 4 ? 2048 : (current && current.s === 3 ? 3072 : 4096);
+    const analysisData = windowSize < data.length ? data.subarray(data.length - windowSize) : data;
+    processMicDetection(detectPitchYin(analysisData, micAudioContext.sampleRate));
     micRaf = requestAnimationFrame(micLoop);
   }
 
@@ -1312,6 +1345,7 @@ body.quiz-active { overscroll-behavior:none; }
     if (micAudioContext) { try { micAudioContext.close(); } catch {} }
     micStream = null; micAudioContext = null; micAnalyser = null; micSource = null;
     micCandidateMidi = null; micCandidateSince = 0; micCandidateLastValid = 0; micStableMidi = null;
+    micValidFrames = []; micPitchHistory = [];
     micToggleBtn.textContent = "Enable mic";
     micDetected.textContent = "—";
     micPitch.textContent = "—";
