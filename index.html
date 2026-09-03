@@ -1543,6 +1543,7 @@ body.quiz-active { overscroll-behavior:none; }
 
   function finishRound() {
     cancelAnimationFrame(raf);
+    releaseScreenWakeLock();
     stopMicrophoneTest();
     quiz.classList.add("hidden");
     resultsCard.classList.remove("hidden");
@@ -1641,6 +1642,33 @@ body.quiz-active { overscroll-behavior:none; }
   }
 
 
+  let screenWakeLock = null;
+
+  async function requestScreenWakeLock() {
+    if (!("wakeLock" in navigator) || document.visibilityState !== "visible" || !document.body.classList.contains("quiz-active")) return;
+    try {
+      if (!screenWakeLock) {
+        screenWakeLock = await navigator.wakeLock.request("screen");
+        screenWakeLock.addEventListener("release", () => { screenWakeLock = null; });
+      }
+    } catch (_) {
+      screenWakeLock = null; // Graceful fallback: the round continues normally.
+    }
+  }
+
+  async function releaseScreenWakeLock() {
+    const lock = screenWakeLock;
+    screenWakeLock = null;
+    if (!lock) return;
+    try { await lock.release(); } catch (_) {}
+  }
+
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible" && document.body.classList.contains("quiz-active")) {
+      requestScreenWakeLock();
+    }
+  });
+
   function beginRound() {
     roundOptions = { game:selectedGame, noteSet:noteSetSelect.value, string:selectedGame === "interval" ? "all" : stringSelect.value, tracked:trackingSelect.value === "tracked" };
     setupStatus.textContent = "";
@@ -1652,6 +1680,7 @@ body.quiz-active { overscroll-behavior:none; }
     rawDetails.classList.remove("hidden");
     quiz.classList.remove("hidden");
     document.body.classList.add("quiz-active");
+    requestScreenWakeLock();
     showQuestion();
   }
 
@@ -1670,6 +1699,7 @@ body.quiz-active { overscroll-behavior:none; }
 
   function showGame(game) {
     cancelAnimationFrame(raf);
+    releaseScreenWakeLock();
     stopMicrophoneTest();
     document.body.classList.remove("quiz-active");
     quiz.classList.add("hidden");
