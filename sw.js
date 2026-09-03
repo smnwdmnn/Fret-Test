@@ -1,5 +1,5 @@
-const CACHE="fret-speed-v39-mic-rearm";
-const ASSETS=["./index.html","./manifest.webmanifest","./icon.svg?v=39"];
+const CACHE="fret-speed-v40-input-choice";
+const ASSETS=["./index.html","./manifest.webmanifest","./icon.svg?v=40"];
 
 self.addEventListener("install", event => {
   event.waitUntil(

@@ -120,7 +120,7 @@ body.quiz-active { overscroll-behavior:none; }
 <body>
 <main>
   <div class="app-header">
-    <div class="title-wrap"><h1>Find the Fret!</h1><span class="version-badge" id="versionBadge">v39</span></div>
+    <div class="title-wrap"><h1>Find the Fret!</h1><span class="version-badge" id="versionBadge">v40</span></div>
     <div class="menu-wrap">
       <button type="button" id="menuBtn" class="secondary menu-btn" aria-expanded="false" aria-controls="gameMenu" aria-label="Choose game">☰</button>
       <div id="gameMenu" class="game-menu hidden" role="menu">
@@ -150,6 +150,19 @@ body.quiz-active { overscroll-behavior:none; }
       <option value="practice">Practice — no timing or stats</option>
     </select>
     <div class="muted" style="margin-top:5px">Practice mode does not change long-term stats, EWMA difficulty, baseline, or aging.</div>
+
+    <div id="inputSetupWrap">
+      <label class="muted" for="inputModeSelect" style="display:block;margin-top:10px">Answer input</label>
+      <select id="inputModeSelect" style="width:100%;margin-top:6px">
+        <option value="keyboard">Keyboard / fret buttons</option>
+        <option value="guitar">Guitar — play to submit</option>
+      </select>
+      <label class="muted" style="display:flex;gap:8px;align-items:center;margin-top:8px">
+        <input type="checkbox" id="rememberInputMode">
+        Remember this choice
+      </label>
+      <div class="muted" id="micSetupStatus" style="margin-top:5px"></div>
+    </div>
 
     <div id="stringSetupWrap">
     <label class="muted" for="stringSelect" style="display:block;margin-top:10px">String</label>
@@ -376,6 +389,10 @@ body.quiz-active { overscroll-behavior:none; }
   const stringSelect = document.getElementById("stringSelect");
   const trackingSelect = document.getElementById("trackingSelect");
   const stringSetupWrap = document.getElementById("stringSetupWrap");
+  const inputSetupWrap = document.getElementById("inputSetupWrap");
+  const inputModeSelect = document.getElementById("inputModeSelect");
+  const rememberInputMode = document.getElementById("rememberInputMode");
+  const micSetupStatus = document.getElementById("micSetupStatus");
   const startRoundBtn = document.getElementById("startRoundBtn");
   const setupStatus = document.getElementById("setupStatus");
   const restartInline = document.getElementById("restartInline");
@@ -446,6 +463,30 @@ body.quiz-active { overscroll-behavior:none; }
   let micValidFrames = [], micPitchHistory = [], micAnswerSubmitted = false;
   let micArmed = true, micSilenceSince = 0, micStartupPauseStart = null;
   let selectedGame = "find";
+  const INPUT_PREF_KEY = "findTheFret.inputMode.v1";
+  let selectedInputMode = "keyboard";
+
+  function loadInputModePreference() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(INPUT_PREF_KEY) || "null");
+      if (saved && (saved.mode === "keyboard" || saved.mode === "guitar")) {
+        selectedInputMode = saved.mode;
+        inputModeSelect.value = saved.mode;
+        rememberInputMode.checked = true;
+      }
+    } catch (_) {}
+  }
+
+  function saveInputModePreference() {
+    selectedInputMode = inputModeSelect.value;
+    try {
+      if (rememberInputMode.checked) {
+        localStorage.setItem(INPUT_PREF_KEY, JSON.stringify({mode:selectedInputMode}));
+      } else {
+        localStorage.removeItem(INPUT_PREF_KEY);
+      }
+    } catch (_) {}
+  }
   let roundOptions = { game:"find", noteSet:"all", string:"all" };
   let comboStats = new Map();
   let roundBaseline = null;
@@ -1376,11 +1417,11 @@ body.quiz-active { overscroll-behavior:none; }
   }
 
   async function startMicrophoneTest() {
-    if (micStream) return;
+    if (micStream) return true;
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       micState.textContent = "Microphone access is not supported in this browser.";
       micState.classList.add("mic-warning");
-      return;
+      return false;
     }
     pauseQuestionTimerForMicStartup();
     try {
@@ -1404,10 +1445,12 @@ body.quiz-active { overscroll-behavior:none; }
       updateMicExpected();
       cancelAnimationFrame(micRaf);
       micRaf = requestAnimationFrame(micLoop);
+      return true;
     } catch (err) {
       stopMicrophoneTest();
       micState.textContent = err && err.name === "NotAllowedError" ? "Microphone permission was denied." : `Could not start microphone: ${err?.message || "unknown error"}`;
       micState.classList.add("mic-warning");
+      return false;
     } finally {
       resumeQuestionTimerAfterMicStartup();
     }
@@ -1443,8 +1486,9 @@ body.quiz-active { overscroll-behavior:none; }
     target.textContent = isInterval ? "Name note ①" : (roundOptions.game === "find" ? current.note : "Name the note");
     tab.textContent = isInterval ? renderIntervalTab(current) : renderTab(current);
     status.textContent = isInterval ? "① lower note → ② higher note" : "";
-    micTestPanel.classList.toggle("hidden", roundOptions.game !== "find");
-    if (roundOptions.game === "find") {
+    const guitarInputActive = roundOptions.game === "find" && roundOptions.inputMode === "guitar";
+    micTestPanel.classList.toggle("hidden", !guitarInputActive);
+    if (guitarInputActive) {
       updateMicExpected();
       if (micStream && micArmed) resetMicCandidate("Ready — play the requested note.");
     }
@@ -1804,9 +1848,35 @@ body.quiz-active { overscroll-behavior:none; }
     }
   });
 
-  function beginRound() {
-    roundOptions = { game:selectedGame, noteSet:noteSetSelect.value, string:selectedGame === "interval" ? "all" : stringSelect.value, tracked:trackingSelect.value === "tracked" };
+  async function beginRound() {
+    const wantsGuitar = selectedGame === "find" && inputModeSelect.value === "guitar";
+    saveInputModePreference();
     setupStatus.textContent = "";
+    micSetupStatus.textContent = "";
+
+    if (wantsGuitar && !micStream) {
+      startRoundBtn.disabled = true;
+      startRoundBtn.textContent = "Enabling microphone…";
+      micSetupStatus.textContent = "Allow microphone access. The round starts only after the mic is ready.";
+      const micReady = await startMicrophoneTest();
+      startRoundBtn.disabled = false;
+      startRoundBtn.textContent = "Start round";
+      if (!micReady) {
+        micSetupStatus.textContent = "Microphone could not be enabled. Choose keyboard input or try again.";
+        return;
+      }
+      micSetupStatus.textContent = "Microphone ready.";
+    } else if (!wantsGuitar && micStream) {
+      stopMicrophoneTest();
+    }
+
+    roundOptions = {
+      game:selectedGame,
+      noteSet:noteSetSelect.value,
+      string:selectedGame === "interval" ? "all" : stringSelect.value,
+      tracked:trackingSelect.value === "tracked",
+      inputMode:wantsGuitar ? "guitar" : "keyboard"
+    };
     idx = 0; results = []; last = null; comboStats = new Map(); roundBaseline = null; itiRoundStats = new Map(); lastIntervalSemitones = null;
     setup.classList.add("hidden");
     scaleSection.classList.add("hidden");
@@ -1835,7 +1905,7 @@ body.quiz-active { overscroll-behavior:none; }
   function showGame(game) {
     cancelAnimationFrame(raf);
     releaseScreenWakeLock();
-    stopMicrophoneTest();
+    if (game !== "find") stopMicrophoneTest();
     document.body.classList.remove("quiz-active");
     quiz.classList.add("hidden");
     resultsCard.classList.add("hidden");
@@ -1864,8 +1934,9 @@ body.quiz-active { overscroll-behavior:none; }
         ? "Identify the lower note, then the higher note, then submit the interval. Interval mistakes are reinforced; response speed is not."
         : (isName
           ? "See a fret on the TAB and identify its note. Choose the note set and, if you want, practise one string only."
-          : "Choose the note set and, if you want, practise one string only.");
+          : "Choose the note set, string, and whether you want to answer with the guitar or fret buttons.");
       stringSetupWrap.classList.toggle("hidden", isInterval);
+      inputSetupWrap.classList.toggle("hidden", game !== "find");
       startRoundBtn.textContent = isInterval ? "Start Investigate the Interval" : (isName ? "Start Name the Note" : "Start round");
       setup.classList.remove("hidden");
     }
@@ -1886,6 +1957,27 @@ body.quiz-active { overscroll-behavior:none; }
     if (micStream) stopMicrophoneTest();
     else startMicrophoneTest();
   });
+
+  inputModeSelect.addEventListener("change", async () => {
+    selectedInputMode = inputModeSelect.value;
+    micSetupStatus.textContent = "";
+    saveInputModePreference();
+
+    if (selectedGame !== "find") return;
+
+    if (selectedInputMode === "guitar") {
+      micSetupStatus.textContent = "Enabling microphone…";
+      const ok = await startMicrophoneTest();
+      micSetupStatus.textContent = ok
+        ? "Microphone ready — start the round when you’re ready."
+        : "Microphone could not be enabled.";
+    } else {
+      if (micStream) stopMicrophoneTest();
+      micSetupStatus.textContent = "Keyboard input selected.";
+    }
+  });
+
+  rememberInputMode.addEventListener("change", saveInputModePreference);
   startRoundBtn.addEventListener("click", beginRound);
   noteSetSelect.addEventListener("change", () => setupStatus.textContent = "");
   restartInline.addEventListener("pointerdown", e => {
@@ -1947,7 +2039,11 @@ body.quiz-active { overscroll-behavior:none; }
     saveScalePrefs();
   });
   loadScalePrefs();
+  loadInputModePreference();
   showGame("find");
+  if (inputModeSelect.value === "guitar") {
+    micSetupStatus.textContent = "Guitar input remembered. Tap Start round to enable the microphone.";
+  }
 
   if ("serviceWorker" in navigator) {
     window.addEventListener("load", async () => {
