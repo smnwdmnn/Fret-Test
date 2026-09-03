@@ -59,6 +59,8 @@ body.quiz-active { overscroll-behavior:none; }
     .scale-result { font-size:25px; font-weight:750; line-height:1.15; }
     .small-actions { display:flex; gap:7px; flex-wrap:wrap; margin-top:8px; }
     .small-actions button { min-height:36px; font-size:13px; }
+    .title-wrap { display:flex; align-items:baseline; gap:8px; min-width:0; }
+    .version-badge { font-size:11px; line-height:1; padding:4px 6px; border:1px solid var(--line); border-radius:999px; color:var(--muted); font-weight:700; letter-spacing:.02em; white-space:nowrap; }
     .app-header { display:flex; align-items:center; justify-content:space-between; gap:10px; position:relative; }
     .app-header h1 { margin-right:auto; }
     .menu-wrap { position:relative; }
@@ -118,7 +120,7 @@ body.quiz-active { overscroll-behavior:none; }
 <body>
 <main>
   <div class="app-header">
-    <h1>Find the Fret!</h1>
+    <div class="title-wrap"><h1>Find the Fret!</h1><span class="version-badge" id="versionBadge">v38</span></div>
     <div class="menu-wrap">
       <button type="button" id="menuBtn" class="secondary menu-btn" aria-expanded="false" aria-controls="gameMenu" aria-label="Choose game">☰</button>
       <div id="gameMenu" class="game-menu hidden" role="menu">
@@ -130,7 +132,7 @@ body.quiz-active { overscroll-behavior:none; }
       </div>
     </div>
   </div>
-  <div class="muted" id="viewSubtitle">Find the fret • MIC TEST • timed automatically • E A D G B e</div>
+  <div class="muted" id="viewSubtitle">Find the fret • play or tap to answer • timed automatically • E A D G B e</div>
 
   <section class="card" id="setup">
     <div class="section-title" id="setupTitle">Find the Fret!</div>
@@ -288,16 +290,16 @@ body.quiz-active { overscroll-behavior:none; }
     <div class="mic-test hidden" id="micTestPanel">
       <div class="row" style="gap:8px;align-items:center">
         <div style="flex:1">
-          <div class="section-title" style="font-size:15px">🎤 Guitar input test</div>
-          <div class="muted">Test only — a stable note will be shown, but it will NOT submit an answer.</div>
+          <div class="section-title" style="font-size:15px">🎤 Play to submit</div>
+          <div class="muted">Play the requested note on the shown string. A stable detection submits automatically; the fret buttons still work too.</div>
         </div>
         <button type="button" id="micToggleBtn" class="secondary">Enable mic</button>
       </div>
       <div class="mic-test-grid">
         <div class="mic-readout"><span class="muted">Detected</span><strong id="micDetected">—</strong></div>
         <div class="mic-readout"><span class="muted">Pitch</span><strong id="micPitch">—</strong></div>
-        <div class="mic-readout"><span class="muted">Prompt string</span><strong id="micExpected">—</strong></div>
-        <div class="mic-readout"><span class="muted">Candidate fret</span><strong id="micCandidate">—</strong></div>
+        <div class="mic-readout"><span class="muted">Input string</span><strong id="micExpected">—</strong></div>
+        <div class="mic-readout"><span class="muted">Played fret</span><strong id="micCandidate">—</strong></div>
       </div>
       <div class="mic-state" id="micState" aria-live="polite">Microphone off.</div>
       <div class="muted" id="micDebug" style="margin-top:4px">Waiting for microphone permission.</div>
@@ -1199,9 +1201,9 @@ body.quiz-active { overscroll-behavior:none; }
       micExpected.textContent = "—";
       return;
     }
-    const openMidi = OPEN_MIDI[current.s];
-    const correctMidi = openMidi + current.fret;
-    micExpected.textContent = `${strings[current.s].name} string · ${midiToLabel(correctMidi)} (fret ${current.fret})`;
+    // Never reveal the target note's fret here: this panel is an input control,
+    // not an answer key.
+    micExpected.textContent = `${strings[current.s].name} string`;
   }
 
   function processMicDetection(det) {
@@ -1291,8 +1293,16 @@ body.quiz-active { overscroll-behavior:none; }
       micState.classList.remove("mic-warning");
 
       if (!micAnswerSubmitted) {
+        const questionIndex = idx;
+        const questionRef = current;
         micAnswerSubmitted = true;
-        submitFret(candidateFret);
+        // Submit synchronously through the same path as a keypad answer.
+        // The guards make sure a stale microphone frame can never answer a later question.
+        if (current === questionRef && idx === questionIndex) {
+          submitFret(candidateFret);
+        } else {
+          micAnswerSubmitted = false;
+        }
       }
     } else {
       micState.textContent = `Candidate ${midiToLabel(micCandidateMidi)} / fret ${candidateFret} — ${candidateVotes}/${MIC_CONFIRM_FRAMES} confirming frames`;
@@ -1449,6 +1459,10 @@ body.quiz-active { overscroll-behavior:none; }
     if (roundOptions.tracked) persistAttempt({game:"find", noteSet:roundOptions.noteSet, stringIndex:current.s, string:strings[current.s].name, fret:current.fret, targetPc:current.pc, targetNote:current.note, answer:n, correct:ok, seconds:+seconds.toFixed(2), timestamp:Date.now()});
 
     status.textContent = ok ? "Correct." : `Correct fret: ${current.fret}`;
+    if (micAnswerSubmitted && micStream) {
+      micState.textContent = ok ? `Submitted by guitar ✓ — fret ${n}` : `Submitted by guitar — fret ${n}`;
+      micState.classList.toggle("mic-stable", ok);
+    }
     const feedbackDelay = showAnswerFeedback(fretButtons, n, current.fret, "fret");
     idx++;
 
@@ -1781,7 +1795,7 @@ body.quiz-active { overscroll-behavior:none; }
       const isInterval = game === "interval";
       viewSubtitle.textContent = isInterval
         ? "Two notes • identify low to high • calculate the interval"
-        : (isName ? "Name the note • timed automatically • E A D G B e" : "Find the fret • MIC TEST • timed automatically • E A D G B e");
+        : (isName ? "Name the note • timed automatically • E A D G B e" : "Find the fret • play or tap to answer • timed automatically • E A D G B e");
       setupTitle.textContent = isInterval ? "Investigate the Interval" : (isName ? "Name the Note" : "Find the Fret!");
       setupHelp.textContent = isInterval
         ? "Identify the lower note, then the higher note, then submit the interval. Interval mistakes are reinforced; response speed is not."
@@ -1873,7 +1887,12 @@ body.quiz-active { overscroll-behavior:none; }
   showGame("find");
 
   if ("serviceWorker" in navigator) {
-    window.addEventListener("load", () => navigator.serviceWorker.register("./sw.js").catch(()=>{}));
+    window.addEventListener("load", async () => {
+      try {
+        const reg = await navigator.serviceWorker.register("./sw.js", {updateViaCache:"none"});
+        await reg.update();
+      } catch (_) {}
+    });
   }
 })();
 </script>
