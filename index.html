@@ -120,7 +120,7 @@ body.quiz-active { overscroll-behavior:none; }
 <body>
 <main>
   <div class="app-header">
-    <div class="title-wrap"><h1>Find the Fret!</h1><span class="version-badge" id="versionBadge">v38</span></div>
+    <div class="title-wrap"><h1>Find the Fret!</h1><span class="version-badge" id="versionBadge">v39</span></div>
     <div class="menu-wrap">
       <button type="button" id="menuBtn" class="secondary menu-btn" aria-expanded="false" aria-controls="gameMenu" aria-label="Choose game">☰</button>
       <div id="gameMenu" class="game-menu hidden" role="menu">
@@ -291,7 +291,7 @@ body.quiz-active { overscroll-behavior:none; }
       <div class="row" style="gap:8px;align-items:center">
         <div style="flex:1">
           <div class="section-title" style="font-size:15px">🎤 Play to submit</div>
-          <div class="muted">Play the requested note on the shown string. A stable detection submits automatically; the fret buttons still work too.</div>
+          <div class="muted">Play the requested note on the shown string. A stable detection submits automatically. Release or mute the string between answers; mic startup time is excluded from the current question.</div>
         </div>
         <button type="button" id="micToggleBtn" class="secondary">Enable mic</button>
       </div>
@@ -436,12 +436,15 @@ body.quiz-active { overscroll-behavior:none; }
   const MIC_CONFIRM_WINDOW_MS = 180;
   const MIC_CONFIRM_FRAMES = 3;
   const MIC_DROPOUT_GRACE_MS = 160;
+  const MIC_REARM_SILENCE_MS = 120;
+  const MIC_REARM_RMS = 0.0012;
   const MIC_MAX_CENTS = 45;
   const MIC_MIN_RMS = 0.0018;
   const MIC_MIN_CONFIDENCE = 0.56;
   let micStream = null, micAudioContext = null, micAnalyser = null, micSource = null, micRaf = null;
   let micCandidateMidi = null, micCandidateSince = 0, micCandidateLastValid = 0, micStableMidi = null;
   let micValidFrames = [], micPitchHistory = [], micAnswerSubmitted = false;
+  let micArmed = true, micSilenceSince = 0, micStartupPauseStart = null;
   let selectedGame = "find";
   let roundOptions = { game:"find", noteSet:"all", string:"all" };
   let comboStats = new Map();
@@ -1196,6 +1199,30 @@ body.quiz-active { overscroll-behavior:none; }
     }
   }
 
+  function disarmMicForNextQuestion() {
+    if (!micStream) return;
+    micArmed = false;
+    micSilenceSince = 0;
+    resetMicCandidate("Release or mute the string to arm the next answer…");
+  }
+
+  function pauseQuestionTimerForMicStartup() {
+    if (!current || roundOptions.game !== "find" || !roundOptions.tracked || micStartupPauseStart !== null) return;
+    micStartupPauseStart = performance.now();
+    cancelAnimationFrame(raf);
+  }
+
+  function resumeQuestionTimerAfterMicStartup() {
+    if (micStartupPauseStart === null) return;
+    const pausedMs = performance.now() - micStartupPauseStart;
+    micStartupPauseStart = null;
+    if (current && roundOptions.game === "find" && roundOptions.tracked) {
+      startedAt += pausedMs;
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(tick);
+    }
+  }
+
   function updateMicExpected() {
     if (!current || roundOptions.game !== "find") {
       micExpected.textContent = "—";
@@ -1209,6 +1236,34 @@ body.quiz-active { overscroll-behavior:none; }
   function processMicDetection(det) {
     if (!current || roundOptions.game !== "find") return;
     const now = performance.now();
+
+    // After every answer, require a brief real release/mute before accepting
+    // another pitch. This prevents the previous sustained note from answering
+    // the next question when it happens to fall inside the next string's range.
+    if (!micArmed) {
+      micDetected.textContent = det.freq && det.confidence >= MIC_MIN_CONFIDENCE
+        ? `${midiToLabel(Math.round(frequencyToMidi(det.freq)))}`
+        : "—";
+      micPitch.textContent = det.rms ? `signal ${(det.rms*100).toFixed(1)}%` : "—";
+      micCandidate.textContent = "waiting for release";
+      micDebug.textContent = `re-arm · RMS ${(det.rms*100).toFixed(3)}% · ${det.rms>0 ? (20*Math.log10(det.rms)).toFixed(1) : "−∞"} dBFS`;
+
+      if (det.rms <= MIC_REARM_RMS) {
+        if (!micSilenceSince) micSilenceSince = now;
+        if (now - micSilenceSince >= MIC_REARM_SILENCE_MS) {
+          micArmed = true;
+          micSilenceSince = 0;
+          micAnswerSubmitted = false;
+          resetMicCandidate("Ready — play the requested note.");
+        } else {
+          micState.textContent = `Release detected — arming in ${Math.max(0, MIC_REARM_SILENCE_MS-(now-micSilenceSince)).toFixed(0)} ms…`;
+        }
+      } else {
+        micSilenceSince = 0;
+        micState.textContent = "Release or mute the string to arm the next answer…";
+      }
+      return;
+    }
 
     // Keep only very recent pitch evidence. This lets a short bright guitar note
     // confirm quickly without requiring an uninterrupted long sustain.
@@ -1327,6 +1382,7 @@ body.quiz-active { overscroll-behavior:none; }
       micState.classList.add("mic-warning");
       return;
     }
+    pauseQuestionTimerForMicStartup();
     try {
       micState.textContent = "Requesting microphone permission…";
       micStream = await navigator.mediaDevices.getUserMedia({
@@ -1341,7 +1397,10 @@ body.quiz-active { overscroll-behavior:none; }
       micSource = micAudioContext.createMediaStreamSource(micStream);
       micSource.connect(micAnalyser);
       micToggleBtn.textContent = "Disable mic";
-      resetMicCandidate();
+      micArmed = true;
+      micSilenceSince = 0;
+      micAnswerSubmitted = false;
+      resetMicCandidate("Ready — play the requested note.");
       updateMicExpected();
       cancelAnimationFrame(micRaf);
       micRaf = requestAnimationFrame(micLoop);
@@ -1349,6 +1408,8 @@ body.quiz-active { overscroll-behavior:none; }
       stopMicrophoneTest();
       micState.textContent = err && err.name === "NotAllowedError" ? "Microphone permission was denied." : `Could not start microphone: ${err?.message || "unknown error"}`;
       micState.classList.add("mic-warning");
+    } finally {
+      resumeQuestionTimerAfterMicStartup();
     }
   }
 
@@ -1361,6 +1422,7 @@ body.quiz-active { overscroll-behavior:none; }
     micStream = null; micAudioContext = null; micAnalyser = null; micSource = null;
     micCandidateMidi = null; micCandidateSince = 0; micCandidateLastValid = 0; micStableMidi = null;
     micValidFrames = []; micPitchHistory = [];
+    micArmed = true; micSilenceSince = 0; micAnswerSubmitted = false;
     micToggleBtn.textContent = "Enable mic";
     micDetected.textContent = "—";
     micPitch.textContent = "—";
@@ -1372,7 +1434,7 @@ body.quiz-active { overscroll-behavior:none; }
 
   function showQuestion() {
     if (idx >= MAX_QUESTIONS) return finishRound();
-    micAnswerSubmitted = false;
+    if (!micStream || micArmed) micAnswerSubmitted = false;
     const isInterval = roundOptions.game === "interval";
     current = isInterval ? randomIntervalQuestion() : randomQuestion();
     const noteLabel = roundOptions.noteSet === "naturals" ? "Naturals" : "With accidentals";
@@ -1384,7 +1446,7 @@ body.quiz-active { overscroll-behavior:none; }
     micTestPanel.classList.toggle("hidden", roundOptions.game !== "find");
     if (roundOptions.game === "find") {
       updateMicExpected();
-      if (micStream) resetMicCandidate();
+      if (micStream && micArmed) resetMicCandidate("Ready — play the requested note.");
     }
     fretGrid.classList.toggle("hidden", roundOptions.game !== "find");
     noteGrid.classList.toggle("hidden", !(roundOptions.game === "name" || isInterval));
@@ -1464,6 +1526,7 @@ body.quiz-active { overscroll-behavior:none; }
       micState.classList.toggle("mic-stable", ok);
     }
     const feedbackDelay = showAnswerFeedback(fretButtons, n, current.fret, "fret");
+    if (micStream) disarmMicForNextQuestion();
     idx++;
 
     setTimeout(showQuestion, feedbackDelay);
