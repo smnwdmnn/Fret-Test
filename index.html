@@ -429,7 +429,7 @@ body.quiz-active { overscroll-behavior:none; }
   const HISTORY_STORE = "attempts";
   let idx = 0, current = null, startedAt = 0, raf = null, results = [], last = null;
 
-  // Microphone pitch test. This build deliberately never calls submitFret().
+  // Microphone pitch input for Find the Fret!: stable detected pitches submit the corresponding fret.
   const OPEN_MIDI = [40,45,50,55,59,64]; // E2 A2 D3 G3 B3 e4
   const MIC_CONFIRM_WINDOW_MS = 180;
   const MIC_CONFIRM_FRAMES = 3;
@@ -439,7 +439,7 @@ body.quiz-active { overscroll-behavior:none; }
   const MIC_MIN_CONFIDENCE = 0.56;
   let micStream = null, micAudioContext = null, micAnalyser = null, micSource = null, micRaf = null;
   let micCandidateMidi = null, micCandidateSince = 0, micCandidateLastValid = 0, micStableMidi = null;
-  let micValidFrames = [], micPitchHistory = [];
+  let micValidFrames = [], micPitchHistory = [], micAnswerSubmitted = false;
   let selectedGame = "find";
   let roundOptions = { game:"find", noteSet:"all", string:"all" };
   let comboStats = new Map();
@@ -1285,10 +1285,15 @@ body.quiz-active { overscroll-behavior:none; }
     if (candidateVotes >= MIC_CONFIRM_FRAMES) {
       micStableMidi = micCandidateMidi;
       const correct = candidateFret === current.fret;
-      micState.textContent = `STABLE ✓ — would submit fret ${candidateFret}${correct ? " (correct)" : " (wrong)"}`;
+      micState.textContent = `STABLE ✓ — submitting fret ${candidateFret}${correct ? " (correct)" : " (wrong)"}`;
       micCandidate.textContent = `${midiToLabel(micCandidateMidi)} / fret ${candidateFret} · ${candidateVotes} confirming frames`;
       micState.classList.add("mic-stable");
       micState.classList.remove("mic-warning");
+
+      if (!micAnswerSubmitted) {
+        micAnswerSubmitted = true;
+        submitFret(candidateFret);
+      }
     } else {
       micState.textContent = `Candidate ${midiToLabel(micCandidateMidi)} / fret ${candidateFret} — ${candidateVotes}/${MIC_CONFIRM_FRAMES} confirming frames`;
       micState.classList.remove("mic-stable","mic-warning");
@@ -1357,6 +1362,7 @@ body.quiz-active { overscroll-behavior:none; }
 
   function showQuestion() {
     if (idx >= MAX_QUESTIONS) return finishRound();
+    micAnswerSubmitted = false;
     const isInterval = roundOptions.game === "interval";
     current = isInterval ? randomIntervalQuestion() : randomQuestion();
     const noteLabel = roundOptions.noteSet === "naturals" ? "Naturals" : "With accidentals";
@@ -1692,8 +1698,12 @@ body.quiz-active { overscroll-behavior:none; }
 
   let screenWakeLock = null;
 
+  function shouldKeepScreenAwake() {
+    return document.body.classList.contains("quiz-active") || !scaleSection.classList.contains("hidden");
+  }
+
   async function requestScreenWakeLock() {
-    if (!("wakeLock" in navigator) || document.visibilityState !== "visible" || !document.body.classList.contains("quiz-active")) return;
+    if (!("wakeLock" in navigator) || document.visibilityState !== "visible" || !shouldKeepScreenAwake()) return;
     try {
       if (!screenWakeLock) {
         screenWakeLock = await navigator.wakeLock.request("screen");
@@ -1712,7 +1722,7 @@ body.quiz-active { overscroll-behavior:none; }
   }
 
   document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible" && document.body.classList.contains("quiz-active")) {
+    if (document.visibilityState === "visible" && shouldKeepScreenAwake()) {
       requestScreenWakeLock();
     }
   });
@@ -1761,6 +1771,7 @@ body.quiz-active { overscroll-behavior:none; }
     if (game === "scale") {
       viewSubtitle.textContent = "Random root + mode + scale type";
       scaleSection.classList.remove("hidden");
+      requestScreenWakeLock();
     } else if (game === "stats") {
       viewSubtitle.textContent = "Long-term persistent performance";
       statsSection.classList.remove("hidden");
