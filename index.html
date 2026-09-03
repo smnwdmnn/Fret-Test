@@ -431,12 +431,13 @@ body.quiz-active { overscroll-behavior:none; }
 
   // Microphone pitch test. This build deliberately never calls submitFret().
   const OPEN_MIDI = [40,45,50,55,59,64]; // E2 A2 D3 G3 B3 e4
-  const MIC_STABLE_MS = 220;
+  const MIC_STABLE_MS = 200;
+  const MIC_DROPOUT_GRACE_MS = 140;
   const MIC_MAX_CENTS = 45;
-  const MIC_MIN_RMS = 0.008;
-  const MIC_MIN_CONFIDENCE = 0.72;
+  const MIC_MIN_RMS = 0.004;
+  const MIC_MIN_CONFIDENCE = 0.60;
   let micStream = null, micAudioContext = null, micAnalyser = null, micSource = null, micRaf = null;
-  let micCandidateMidi = null, micCandidateSince = 0, micStableMidi = null;
+  let micCandidateMidi = null, micCandidateSince = 0, micCandidateLastValid = 0, micStableMidi = null;
   let selectedGame = "find";
   let roundOptions = { game:"find", noteSet:"all", string:"all" };
   let comboStats = new Map();
@@ -1181,6 +1182,7 @@ body.quiz-active { overscroll-behavior:none; }
   function resetMicCandidate(message="Listening for a clear single note…") {
     micCandidateMidi = null;
     micCandidateSince = 0;
+    micCandidateLastValid = 0;
     micStableMidi = null;
     if (micState) {
       micState.textContent = message;
@@ -1204,9 +1206,19 @@ body.quiz-active { overscroll-behavior:none; }
     if (!det.freq || det.confidence < MIC_MIN_CONFIDENCE) {
       micDetected.textContent = "—";
       micPitch.textContent = det.rms ? `signal ${(det.rms*100).toFixed(1)}%` : "—";
+      micDebug.textContent = `confidence ${(det.confidence*100).toFixed(0)}% · RMS ${(det.rms*100).toFixed(2)}%`;
+
+      const dropoutMs = micCandidateMidi !== null && micCandidateLastValid
+        ? now - micCandidateLastValid
+        : Infinity;
+      if (dropoutMs <= MIC_DROPOUT_GRACE_MS) {
+        micCandidate.textContent = `holding ${midiToLabel(micCandidateMidi)}`;
+        micState.textContent = "Brief pitch dropout — keeping the candidate…";
+        return;
+      }
+
       micCandidate.textContent = "—";
       resetMicCandidate(det.rms >= MIC_MIN_RMS ? "Pitch unclear — keep the note ringing." : "Listening for a clear single note…");
-      micDebug.textContent = `confidence ${(det.confidence*100).toFixed(0)}% · RMS ${(det.rms*100).toFixed(2)}%`;
       return;
     }
 
@@ -1232,12 +1244,14 @@ body.quiz-active { overscroll-behavior:none; }
     if (micCandidateMidi !== midi) {
       micCandidateMidi = midi;
       micCandidateSince = now;
+      micCandidateLastValid = now;
       micStableMidi = null;
       micState.textContent = `Candidate ${midiToLabel(midi)} / fret ${fret} — hold…`;
       micState.classList.remove("mic-stable","mic-warning");
       return;
     }
 
+    micCandidateLastValid = now;
     const heldMs = now - micCandidateSince;
     if (heldMs >= MIC_STABLE_MS) {
       micStableMidi = midi;
@@ -1268,7 +1282,7 @@ body.quiz-active { overscroll-behavior:none; }
     try {
       micState.textContent = "Requesting microphone permission…";
       micStream = await navigator.mediaDevices.getUserMedia({
-        audio:{echoCancellation:false, noiseSuppression:false, autoGainControl:false}, video:false
+        audio:{echoCancellation:false, noiseSuppression:false, autoGainControl:true}, video:false
       });
       const AudioCtx = window.AudioContext || window.webkitAudioContext;
       micAudioContext = new AudioCtx();
@@ -1297,7 +1311,7 @@ body.quiz-active { overscroll-behavior:none; }
     if (micStream) micStream.getTracks().forEach(t => t.stop());
     if (micAudioContext) { try { micAudioContext.close(); } catch {} }
     micStream = null; micAudioContext = null; micAnalyser = null; micSource = null;
-    micCandidateMidi = null; micCandidateSince = 0; micStableMidi = null;
+    micCandidateMidi = null; micCandidateSince = 0; micCandidateLastValid = 0; micStableMidi = null;
     micToggleBtn.textContent = "Enable mic";
     micDetected.textContent = "—";
     micPitch.textContent = "—";
