@@ -120,7 +120,7 @@ body.quiz-active { overscroll-behavior:none; }
 <body>
 <main>
   <div class="app-header">
-    <div class="title-wrap"><h1>Find the Fret!</h1><span class="version-badge" id="versionBadge">v40</span></div>
+    <div class="title-wrap"><h1>Find the Fret!</h1><span class="version-badge" id="versionBadge">v41</span></div>
     <div class="menu-wrap">
       <button type="button" id="menuBtn" class="secondary menu-btn" aria-expanded="false" aria-controls="gameMenu" aria-label="Choose game">☰</button>
       <div id="gameMenu" class="game-menu hidden" role="menu">
@@ -231,6 +231,15 @@ body.quiz-active { overscroll-behavior:none; }
         <option value="naturals">Naturals only</option>
         <option value="all">With accidentals</option>
       </select>
+    </div>
+    <div id="statsInputWrap" style="margin-top:8px">
+      <select id="statsInputSelect" style="width:100%">
+        <option value="allInputs">All answer inputs</option>
+        <option value="keyboard">Keyboard / fret buttons</option>
+        <option value="guitar">Guitar — play to submit</option>
+        <option value="legacy">Legacy / unclassified</option>
+      </select>
+      <div class="muted" style="margin-top:5px">Input type is tracked separately from v41 onward. Older Find the Fret! attempts remain unclassified.</div>
     </div>
     <div id="statsContent" style="margin-top:10px"><div class="muted">No persistent attempts yet.</div></div>
   </section>
@@ -382,6 +391,8 @@ body.quiz-active { overscroll-behavior:none; }
   const statsSection = document.getElementById("statsSection");
   const statsGameSelect = document.getElementById("statsGameSelect");
   const statsNoteSetSelect = document.getElementById("statsNoteSetSelect");
+  const statsInputWrap = document.getElementById("statsInputWrap");
+  const statsInputSelect = document.getElementById("statsInputSelect");
   const statsContent = document.getElementById("statsContent");
   const quiz = document.getElementById("quiz");
   const resultsCard = document.getElementById("resultsCard");
@@ -456,6 +467,7 @@ body.quiz-active { overscroll-behavior:none; }
   const MIC_REARM_SILENCE_MS = 120;
   const MIC_REARM_RMS = 0.0012;
   const MIC_MAX_CENTS = 45;
+  const MIC_SUBMIT_MAX_CENTS = 28;
   const MIC_MIN_RMS = 0.0018;
   const MIC_MIN_CONFIDENCE = 0.56;
   let micStream = null, micAudioContext = null, micAnalyser = null, micSource = null, micRaf = null;
@@ -711,7 +723,14 @@ body.quiz-active { overscroll-behavior:none; }
     const all = await loadAttemptHistory();
     const game = statsGameSelect.value;
     const ns = statsNoteSetSelect.value;
-    const rows = all.filter(r=>r.game===game && (ns==="allHistory" || r.noteSet===ns));
+    const inputFilter = statsInputSelect.value;
+    statsInputWrap.classList.toggle("hidden", game !== "find");
+    const rows = all.filter(r => {
+      if (r.game !== game || !(ns === "allHistory" || r.noteSet === ns)) return false;
+      if (game !== "find" || inputFilter === "allInputs") return true;
+      if (inputFilter === "legacy") return !r.inputMode;
+      return r.inputMode === inputFilter;
+    });
     if (!rows.length) { statsContent.innerHTML=`<div class="muted">No persistent attempts yet for this selection. History begins with v25.</div>`; return; }
     if (game === "interval") {
       const acc=rows.filter(r=>r.correct).length/rows.length*100;
@@ -1362,7 +1381,7 @@ body.quiz-active { overscroll-behavior:none; }
     }
 
     micCandidateLastValid = now;
-    micValidFrames.push({t:now, midi});
+    micValidFrames.push({t:now, midi, cents});
     micValidFrames = micValidFrames.filter(x => now - x.t <= MIC_CONFIRM_WINDOW_MS);
 
     const counts = new Map();
@@ -1380,7 +1399,16 @@ body.quiz-active { overscroll-behavior:none; }
 
     const candidateFret = micCandidateMidi - openMidi;
     const candidateVotes = counts.get(micCandidateMidi) || 0;
-    if (candidateVotes >= MIC_CONFIRM_FRAMES) {
+    const candidateCents = micValidFrames
+      .filter(x => x.midi === micCandidateMidi)
+      .map(x => x.cents)
+      .sort((a,b)=>a-b);
+    const medianCandidateCents = candidateCents.length
+      ? candidateCents[Math.floor(candidateCents.length/2)]
+      : Infinity;
+    const centeredEnoughToSubmit = Math.abs(medianCandidateCents) <= MIC_SUBMIT_MAX_CENTS;
+
+    if (candidateVotes >= MIC_CONFIRM_FRAMES && centeredEnoughToSubmit) {
       micStableMidi = micCandidateMidi;
       const correct = candidateFret === current.fret;
       micState.textContent = `STABLE ✓ — submitting fret ${candidateFret}${correct ? " (correct)" : " (wrong)"}`;
@@ -1401,7 +1429,11 @@ body.quiz-active { overscroll-behavior:none; }
         }
       }
     } else {
-      micState.textContent = `Candidate ${midiToLabel(micCandidateMidi)} / fret ${candidateFret} — ${candidateVotes}/${MIC_CONFIRM_FRAMES} confirming frames`;
+      if (candidateVotes >= MIC_CONFIRM_FRAMES && !centeredEnoughToSubmit) {
+        micState.textContent = `Candidate ${midiToLabel(micCandidateMidi)} / fret ${candidateFret} is ${medianCandidateCents >= 0 ? "+" : ""}${medianCandidateCents.toFixed(0)}¢ — waiting for a clearer pitch center`;
+      } else {
+        micState.textContent = `Candidate ${midiToLabel(micCandidateMidi)} / fret ${candidateFret} — ${candidateVotes}/${MIC_CONFIRM_FRAMES} confirming frames`;
+      }
       micState.classList.remove("mic-stable","mic-warning");
     }
   }
@@ -1562,7 +1594,7 @@ body.quiz-active { overscroll-behavior:none; }
       ok,
       seconds: +seconds.toFixed(2)
     });
-    if (roundOptions.tracked) persistAttempt({game:"find", noteSet:roundOptions.noteSet, stringIndex:current.s, string:strings[current.s].name, fret:current.fret, targetPc:current.pc, targetNote:current.note, answer:n, correct:ok, seconds:+seconds.toFixed(2), timestamp:Date.now()});
+    if (roundOptions.tracked) persistAttempt({game:"find", noteSet:roundOptions.noteSet, inputMode:roundOptions.inputMode || "keyboard", stringIndex:current.s, string:strings[current.s].name, fret:current.fret, targetPc:current.pc, targetNote:current.note, answer:n, correct:ok, seconds:+seconds.toFixed(2), timestamp:Date.now()});
 
     status.textContent = ok ? "Correct." : `Correct fret: ${current.fret}`;
     if (micAnswerSubmitted && micStream) {
@@ -2014,8 +2046,12 @@ body.quiz-active { overscroll-behavior:none; }
   diatonicToggle.addEventListener("change", saveScalePrefs);
   pentatonicToggle.addEventListener("change", saveScalePrefs);
   randomScaleBtn.addEventListener("click", randomScale);
-  statsGameSelect.addEventListener("change", renderLongTermStats);
+  statsGameSelect.addEventListener("change", () => {
+    statsInputWrap.classList.toggle("hidden", statsGameSelect.value !== "find");
+    renderLongTermStats();
+  });
   statsNoteSetSelect.addEventListener("change", renderLongTermStats);
+  statsInputSelect.addEventListener("change", renderLongTermStats);
   statsContent.addEventListener("click", e => {
     const btn=e.target.closest("[data-stats-sort]");
     if(!btn) return;
