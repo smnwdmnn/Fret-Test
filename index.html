@@ -434,8 +434,8 @@ body.quiz-active { overscroll-behavior:none; }
   const MIC_STABLE_MS = 200;
   const MIC_DROPOUT_GRACE_MS = 140;
   const MIC_MAX_CENTS = 45;
-  const MIC_MIN_RMS = 0.004;
-  const MIC_MIN_CONFIDENCE = 0.60;
+  const MIC_MIN_RMS = 0.0018;
+  const MIC_MIN_CONFIDENCE = 0.56;
   let micStream = null, micAudioContext = null, micAnalyser = null, micSource = null, micRaf = null;
   let micCandidateMidi = null, micCandidateSince = 0, micCandidateLastValid = 0, micStableMidi = null;
   let selectedGame = "find";
@@ -1128,7 +1128,7 @@ body.quiz-active { overscroll-behavior:none; }
       power += x*x;
     }
     const rms = Math.sqrt(power / buffer.length);
-    if (rms < MIC_MIN_RMS) return {freq:null, confidence:0, rms};
+    if (rms < 0.0008) return {freq:null, confidence:0, rms};
 
     const minFreq = 70, maxFreq = 700;
     const minTau = Math.max(2, Math.floor(sampleRate / maxFreq));
@@ -1206,7 +1206,7 @@ body.quiz-active { overscroll-behavior:none; }
     if (!det.freq || det.confidence < MIC_MIN_CONFIDENCE) {
       micDetected.textContent = "—";
       micPitch.textContent = det.rms ? `signal ${(det.rms*100).toFixed(1)}%` : "—";
-      micDebug.textContent = `confidence ${(det.confidence*100).toFixed(0)}% · RMS ${(det.rms*100).toFixed(2)}%`;
+      micDebug.textContent = `confidence ${(det.confidence*100).toFixed(0)}% · RMS ${(det.rms*100).toFixed(3)}% · ${det.rms>0 ? (20*Math.log10(det.rms)).toFixed(1) : "−∞"} dBFS`;
 
       const dropoutMs = micCandidateMidi !== null && micCandidateLastValid
         ? now - micCandidateLastValid
@@ -1233,7 +1233,7 @@ body.quiz-active { overscroll-behavior:none; }
     micDetected.textContent = `${midiToLabel(midi)} ${cents >= 0 ? "+" : ""}${cents.toFixed(0)}¢`;
     micPitch.textContent = `${det.freq.toFixed(1)} Hz`;
     micCandidate.textContent = onPromptString ? `fret ${fret}` : "outside 0–11";
-    micDebug.textContent = `confidence ${(det.confidence*100).toFixed(0)}% · RMS ${(det.rms*100).toFixed(2)}%`;
+    micDebug.textContent = `confidence ${(det.confidence*100).toFixed(0)}% · RMS ${(det.rms*100).toFixed(3)}% · ${det.rms>0 ? (20*Math.log10(det.rms)).toFixed(1) : "−∞"} dBFS`;
 
     if (!onPromptString || !inTuneEnough) {
       resetMicCandidate(!onPromptString ? "Clear pitch, but not in this string's 0–11 range." : "Pitch is too far between notes — keep it steady.");
